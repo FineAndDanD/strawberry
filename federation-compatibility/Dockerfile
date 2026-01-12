@@ -9,7 +9,7 @@ COPY pyproject.toml ./
 COPY poetry.lock ./
 COPY README.md ./
 
-RUN poetry install
+RUN poetry install --extras apollo-federation
 
 COPY federation-compatibility/schema.py ./
 
