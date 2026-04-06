@@ -156,6 +156,48 @@ class _SimpleTrace:
         return b"".join(parts)
 
 
+class _SimpleError:
+    """Minimal Error message for FTV1."""
+
+    def __init__(
+        self,
+        message: str,
+        location_line: int = 0,
+        location_column: int = 0,
+    ) -> None:
+        self.message = message
+        self.location_line = location_line
+        self.location_column = location_column
+
+    def SerializeToString(self) -> bytes:  # noqa: N802
+        """Serialize to protobuf binary format."""
+        parts = []
+
+        # Field 1: message (string)
+        if self.message:
+            msg_bytes = self.message.encode("utf-8")
+            parts.append(b"\x0a")  # field 1, wire type 2
+            parts.append(_encode_varint(len(msg_bytes)))
+            parts.append(msg_bytes)
+
+        # Field 2: location (repeated Location message)
+        # Location has: line (field 1), column (field 2)
+        if self.location_line or self.location_column:
+            loc_parts = []
+            if self.location_line:
+                loc_parts.append(b"\x08")  # field 1, wire type 0
+                loc_parts.append(_encode_varint(self.location_line))
+            if self.location_column:
+                loc_parts.append(b"\x10")  # field 2, wire type 0
+                loc_parts.append(_encode_varint(self.location_column))
+            loc_bytes = b"".join(loc_parts)
+            parts.append(b"\x12")  # field 2, wire type 2
+            parts.append(_encode_varint(len(loc_bytes)))
+            parts.append(loc_bytes)
+
+        return b"".join(parts)
+
+
 class _SimpleNode:
     """Minimal Node message for FTV1."""
 
@@ -167,6 +209,7 @@ class _SimpleNode:
         self.start_time: int = 0
         self.end_time: int = 0
         self.children: list[_SimpleNode] = []
+        self.errors: list[_SimpleError] = []
 
     def SerializeToString(self) -> bytes:  # noqa: N802
         """Serialize to protobuf binary format."""
@@ -206,6 +249,13 @@ class _SimpleNode:
         if self.end_time:
             parts.append(b"\x48")  # field 9, wire type 0
             parts.append(_encode_varint(self.end_time))
+
+        # Field 11: error (repeated Error)
+        for error in self.errors:
+            error_bytes = error.SerializeToString()
+            parts.append(b"\x5a")  # field 11, wire type 2
+            parts.append(_encode_varint(len(error_bytes)))
+            parts.append(error_bytes)
 
         # Field 12: child (repeated Node)
         for child in self.children:
@@ -316,6 +366,24 @@ class ApolloFederationTracingExtension(SchemaExtension):
             result = _next(root, info, *args, **kwargs)
             if isawaitable(result):
                 result = await result
+        except Exception as e:
+            # Capture error for FTV1 trace
+            location_line = 0
+            location_column = 0
+            if info.field_nodes:
+                loc = info.field_nodes[0].loc
+                if loc:
+                    location_line = loc.start_token.line
+                    location_column = loc.start_token.column
+            node.errors.append(
+                _SimpleError(
+                    message=str(e),
+                    location_line=location_line,
+                    location_column=location_column,
+                )
+            )
+            raise
+        else:
             return result
         finally:
             node.end_time = time.perf_counter_ns() - self._start_time_ns
@@ -419,6 +487,23 @@ class ApolloFederationTracingExtensionSync(ApolloFederationTracingExtension):
 
         try:
             return _next(root, info, *args, **kwargs)
+        except Exception as e:
+            # Capture error for FTV1 trace
+            location_line = 0
+            location_column = 0
+            if info.field_nodes:
+                loc = info.field_nodes[0].loc
+                if loc:
+                    location_line = loc.start_token.line
+                    location_column = loc.start_token.column
+            node.errors.append(
+                _SimpleError(
+                    message=str(e),
+                    location_line=location_line,
+                    location_column=location_column,
+                )
+            )
+            raise
         finally:
             node.end_time = time.perf_counter_ns() - self._start_time_ns
 

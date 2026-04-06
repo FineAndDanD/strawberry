@@ -375,3 +375,112 @@ def test_tracing_with_no_request_in_context():
 
     assert not result.errors
     assert "ftv1" not in result.extensions
+
+
+def test_tracing_captures_errors_sync(mock_request_with_ftv1_header):
+    """Test that errors are captured in FTV1 trace (sync)."""
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def failing(self) -> str:
+            raise ValueError("Something went wrong")
+
+    schema = strawberry.Schema(
+        query=Query, extensions=[ApolloFederationTracingExtensionSync]
+    )
+
+    result = schema.execute_sync(
+        "query { failing }", context_value={"request": mock_request_with_ftv1_header}
+    )
+
+    # Should have errors in the result
+    assert result.errors is not None
+    assert len(result.errors) == 1
+    assert "Something went wrong" in str(result.errors[0])
+
+    # Should still have ftv1 trace with error encoded
+    assert "ftv1" in result.extensions
+    ftv1_data = result.extensions["ftv1"]
+    decoded = base64.b64decode(ftv1_data)
+    assert isinstance(decoded, bytes)
+    assert len(decoded) > 0
+    # The error message should be in the trace
+    assert b"Something went wrong" in decoded
+
+
+@pytest.mark.asyncio
+async def test_tracing_captures_errors_async(mock_request_with_ftv1_header):
+    """Test that errors are captured in FTV1 trace (async)."""
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        async def failing(self) -> str:
+            raise ValueError("Async error occurred")
+
+    schema = strawberry.Schema(
+        query=Query, extensions=[ApolloFederationTracingExtension]
+    )
+
+    result = await schema.execute(
+        "query { failing }", context_value={"request": mock_request_with_ftv1_header}
+    )
+
+    # Should have errors in the result
+    assert result.errors is not None
+    assert len(result.errors) == 1
+    assert "Async error occurred" in str(result.errors[0])
+
+    # Should still have ftv1 trace with error encoded
+    assert "ftv1" in result.extensions
+    ftv1_data = result.extensions["ftv1"]
+    decoded = base64.b64decode(ftv1_data)
+    assert isinstance(decoded, bytes)
+    assert len(decoded) > 0
+    # The error message should be in the trace
+    assert b"Async error occurred" in decoded
+
+
+def test_tracing_captures_nested_errors(mock_request_with_ftv1_header):
+    """Test that errors in nested resolvers are captured."""
+
+    @strawberry.type
+    class Person:
+        name: str = "Alice"
+
+        @strawberry.field
+        def failing_field(self) -> str:
+            raise RuntimeError("Nested resolver failed")
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def person(self) -> Person:
+            return Person()
+
+    schema = strawberry.Schema(
+        query=Query, extensions=[ApolloFederationTracingExtensionSync]
+    )
+
+    query = """
+        query {
+            person {
+                name
+                failingField
+            }
+        }
+    """
+
+    result = schema.execute_sync(
+        query, context_value={"request": mock_request_with_ftv1_header}
+    )
+
+    assert result.errors is not None
+    assert len(result.errors) == 1
+    assert "Nested resolver failed" in str(result.errors[0])
+
+    # Should still have ftv1 trace
+    assert "ftv1" in result.extensions
+    decoded = base64.b64decode(result.extensions["ftv1"])
+    assert b"Nested resolver failed" in decoded
