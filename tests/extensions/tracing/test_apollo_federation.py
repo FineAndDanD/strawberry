@@ -484,3 +484,148 @@ def test_tracing_captures_nested_errors(mock_request_with_ftv1_header):
     assert "ftv1" in result.extensions
     decoded = base64.b64decode(result.extensions["ftv1"])
     assert b"Nested resolver failed" in decoded
+
+
+def test_tracing_error_json_includes_path(mock_request_with_ftv1_header):
+    """Test that error JSON includes the field path."""
+
+    @strawberry.type
+    class Person:
+        name: str = "Alice"
+
+        @strawberry.field
+        def failing_field(self) -> str:
+            raise RuntimeError("Path test error")
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def person(self) -> Person:
+            return Person()
+
+    schema = strawberry.Schema(
+        query=Query, extensions=[ApolloFederationTracingExtensionSync]
+    )
+
+    query = """
+        query {
+            person {
+                failingField
+            }
+        }
+    """
+
+    result = schema.execute_sync(
+        query, context_value={"request": mock_request_with_ftv1_header}
+    )
+
+    assert result.errors is not None
+    decoded = base64.b64decode(result.extensions["ftv1"])
+
+    # Verify JSON field contains path information
+    assert b'"path"' in decoded
+    assert b"failingField" in decoded
+    assert b"person" in decoded
+
+
+def test_simple_error_serialization():
+    """Test _SimpleError serializes all fields correctly."""
+    from strawberry.extensions.tracing.apollo_federation import _SimpleError
+
+    error = _SimpleError(
+        message="Test error",
+        location_line=5,
+        location_column=10,
+        json_error='{"message":"Test error","path":["query","field"]}',
+    )
+    serialized = error.SerializeToString()
+
+    # Verify message is in serialized output
+    assert b"Test error" in serialized
+    # Verify JSON content is in serialized output
+    assert b'"path"' in serialized
+    assert b'"message"' in serialized
+
+
+def test_tracing_captures_multiple_errors(mock_request_with_ftv1_header):
+    """Test that multiple errors in a single query are all captured."""
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def failing_one(self) -> str | None:
+            raise ValueError("First error")
+
+        @strawberry.field
+        def failing_two(self) -> str | None:
+            raise ValueError("Second error")
+
+    schema = strawberry.Schema(
+        query=Query, extensions=[ApolloFederationTracingExtensionSync]
+    )
+
+    query = """
+        query {
+            failingOne
+            failingTwo
+        }
+    """
+
+    result = schema.execute_sync(
+        query, context_value={"request": mock_request_with_ftv1_header}
+    )
+
+    # Should have both errors (nullable fields allow independent failures)
+    assert result.errors is not None
+    assert len(result.errors) == 2
+
+    # Both error messages should be in the trace
+    assert "ftv1" in result.extensions
+    decoded = base64.b64decode(result.extensions["ftv1"])
+    assert b"First error" in decoded
+    assert b"Second error" in decoded
+
+
+def test_tracing_error_location_encoding(mock_request_with_ftv1_header):
+    """Test that error location (line/column) is encoded in FTV1 trace."""
+    from strawberry.extensions.tracing.apollo_federation import (
+        _SimpleError,
+    )
+
+    # Unit test: verify location encoding in _SimpleError
+    error = _SimpleError(
+        message="Location test",
+        location_line=3,
+        location_column=15,
+        json_error='{"message":"Location test"}',
+    )
+    serialized = error.SerializeToString()
+
+    # Field 2 (location) should be present with wire type 2 (length-delimited)
+    # 0x12 = (2 << 3) | 2 = field 2, wire type 2
+    assert b"\x12" in serialized
+
+    # Integration test: verify location is captured from actual query
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def failing(self) -> str:
+            raise ValueError("Location error")
+
+    schema = strawberry.Schema(
+        query=Query, extensions=[ApolloFederationTracingExtensionSync]
+    )
+
+    result = schema.execute_sync(
+        "query { failing }", context_value={"request": mock_request_with_ftv1_header}
+    )
+
+    assert result.errors is not None
+    decoded = base64.b64decode(result.extensions["ftv1"])
+
+    # The location field marker (0x12) should be in the trace
+    assert b"\x12" in decoded
+    # The JSON should contain locations array
+    assert b'"locations"' in decoded
+    assert b'"line"' in decoded
+    assert b'"column"' in decoded
