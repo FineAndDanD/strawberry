@@ -334,7 +334,7 @@ class ApolloFederationTracingExtension(SchemaExtension):
 
         if self._should_trace:
             try:
-                _create_trace()  # Validates protobuf is available
+                _check_protobuf_available()
                 self._trace = _SimpleTrace()
                 self._trace.start_time = _get_protobuf_timestamp()
                 self._start_time_ns = time.perf_counter_ns()

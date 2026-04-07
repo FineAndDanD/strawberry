@@ -54,6 +54,7 @@ class BaseGraphQLTransportWSHandler(Generic[Context, RootValue]):
         root_value: RootValue | None,
         schema: BaseSchema,
         connection_init_wait_timeout: timedelta,
+        max_subscriptions_per_connection: int | None = None,
     ) -> None:
         self.view = view
         self.websocket = websocket
@@ -61,12 +62,12 @@ class BaseGraphQLTransportWSHandler(Generic[Context, RootValue]):
         self.root_value = root_value
         self.schema = schema
         self.connection_init_wait_timeout = connection_init_wait_timeout
+        self.max_subscriptions_per_connection = max_subscriptions_per_connection
         self.connection_init_timeout_task: asyncio.Task | None = None
         self.connection_init_received = False
         self.connection_acknowledged = False
         self.connection_timed_out = False
         self.operations: dict[str, Operation[Context, RootValue]] = {}
-        self.completed_tasks: list[asyncio.Task] = []
 
     async def handle(self) -> None:
         self.on_request_accepted()
@@ -94,7 +95,6 @@ class BaseGraphQLTransportWSHandler(Generic[Context, RootValue]):
 
         for operation_id in list(self.operations.keys()):
             await self.cleanup_operation(operation_id)
-        await self.reap_completed_tasks()
 
     def on_request_accepted(self) -> None:
         # handle_request should call this once it has sent the
@@ -103,10 +103,9 @@ class BaseGraphQLTransportWSHandler(Generic[Context, RootValue]):
         self.connection_init_timeout_task = asyncio.create_task(
             self.handle_connection_init_timeout()
         )
+        self.connection_init_timeout_task.add_done_callback(self._task_done)
 
     async def handle_connection_init_timeout(self) -> None:
-        task = asyncio.current_task()
-        assert task
         try:
             delay = self.connection_init_wait_timeout.total_seconds()
             await asyncio.sleep(delay=delay)
@@ -119,10 +118,13 @@ class BaseGraphQLTransportWSHandler(Generic[Context, RootValue]):
             await self.websocket.close(code=4408, reason=reason)
         except Exception as error:  # noqa: BLE001
             await self.handle_task_exception(error)  # pragma: no cover
-        finally:
-            # do not clear self.connection_init_timeout_task
-            # so that unittests can inspect it.
-            self.completed_tasks.append(task)
+
+    def _task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        # Retrieve exception to prevent "Task exception was never retrieved" warning.
+        # Exceptions are already logged by handle_task_exception in the coroutines.
+        task.exception()
 
     async def handle_task_exception(self, error: Exception) -> None:  # pragma: no cover
         self.task_logger.exception("Exception in worker task", exc_info=error)
@@ -150,8 +152,6 @@ class BaseGraphQLTransportWSHandler(Generic[Context, RootValue]):
 
         except KeyError:
             await self.handle_invalid_message("Failed to parse message")
-        finally:
-            await self.reap_completed_tasks()
 
     async def handle_connection_init(self, message: ConnectionInitMessage) -> None:
         if self.connection_timed_out:
@@ -233,6 +233,22 @@ class BaseGraphQLTransportWSHandler(Generic[Context, RootValue]):
             await self.websocket.close(code=4409, reason=reason)
             return
 
+        # NOTE: this applies to all in-flight operations (queries and mutations
+        # executed over WebSocket included), not only subscriptions.
+        if (
+            self.max_subscriptions_per_connection is not None
+            and len(self.operations) >= self.max_subscriptions_per_connection
+        ):
+            error = GraphQLError("Subscription limit reached")
+            await self.send_message(
+                {
+                    "id": message["id"],
+                    "type": "error",
+                    "payload": [error.formatted],
+                }
+            )
+            return
+
         operation = Operation(
             self,
             message["id"],
@@ -243,6 +259,7 @@ class BaseGraphQLTransportWSHandler(Generic[Context, RootValue]):
         )
 
         operation.task = asyncio.create_task(self.run_operation(operation))
+        operation.task.add_done_callback(self._task_done)
         self.operations[message["id"]] = operation
 
     async def run_operation(self, operation: Operation[Context, RootValue]) -> None:
@@ -303,11 +320,6 @@ class BaseGraphQLTransportWSHandler(Generic[Context, RootValue]):
             self.operations.pop(operation.id, None)
 
             raise
-        finally:
-            # add this task to a list to be reaped later
-            task = asyncio.current_task()
-            assert task is not None
-            self.completed_tasks.append(task)
 
     def forget_id(self, id: str) -> None:
         # de-register the operation id making it immediately available
@@ -331,13 +343,6 @@ class BaseGraphQLTransportWSHandler(Generic[Context, RootValue]):
         operation.task.cancel()
         # do not await the task here, lest we block the main
         # websocket handler Task.
-
-    async def reap_completed_tasks(self) -> None:
-        """Await tasks that have completed."""
-        tasks, self.completed_tasks = self.completed_tasks, []
-        for task in tasks:
-            with suppress(BaseException):
-                await task
 
 
 class Operation(Generic[Context, RootValue]):

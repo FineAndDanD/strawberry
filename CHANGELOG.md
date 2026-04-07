@@ -1,6 +1,109 @@
 CHANGELOG
 =========
 
+0.314.0 - 2026-04-07
+--------------------
+
+This release adds support for Apollo Federation inline tracing (FTV1).
+
+When a request includes the `apollo-federation-include-trace: ftv1` header, Strawberry now records per-resolver timing information and includes it in the response under `extensions.ftv1` as a base64-encoded protobuf message, following the [Apollo Federation trace format](https://www.apollographql.com/docs/federation/metrics/). This allows an Apollo Gateway to aggregate subgraph traces and report them to Apollo Studio.
+
+Install the new optional extra to pull in the required `protobuf` dependency:
+
+```shell
+pip install 'strawberry-graphql[apollo-federation]'
+```
+
+Use the async extension for async schemas:
+
+```python
+import strawberry
+from strawberry.extensions.tracing import ApolloFederationTracingExtension
+
+
+@strawberry.type
+class Query:
+    @strawberry.field
+    def hello(self) -> str:
+        return "Hello, world!"
+
+
+schema = strawberry.Schema(
+    query=Query,
+    extensions=[ApolloFederationTracingExtension],
+)
+```
+
+Or the sync version when running outside of an async context:
+
+```python
+from strawberry.extensions.tracing import ApolloFederationTracingExtensionSync
+
+schema = strawberry.Schema(
+    query=Query,
+    extensions=[ApolloFederationTracingExtensionSync],
+)
+```
+
+> **Security:** any client can send the `apollo-federation-include-trace: ftv1` header unless you restrict it. Tracing payloads expose resolver timing details, so make sure only a trusted Apollo Gateway (or other internal traffic) can request traces — for example by enforcing authentication, network policy, or stripping the header from public requests at the edge.
+
+Contributed by [Thiago Bellini Ribeiro](https://github.com/bellini666) via [PR #4136](https://github.com/strawberry-graphql/strawberry/pull/4136/)
+
+0.313.0 - 2026-04-06
+--------------------
+
+Add PydanticErrorExtension to format validation errors into structured GraphQL error extensions.
+
+Includes:
+- Structured validation_errors output
+- Support for Pydantic v1 and v2
+
+Contributed by [Peehu Kandwal](https://github.com/peehu-k) via [PR #4342](https://github.com/strawberry-graphql/strawberry/pull/4342/)
+
+
+0.312.4 - 2026-04-05
+--------------------
+
+Fix a memory leak in the `graphql-transport-ws` WebSocket handler where completed
+task objects would accumulate in a list between messages. Task cleanup now uses
+`asyncio.Task.add_done_callback` for immediate cleanup instead of deferred reaping.
+
+Contributed by [Thiago Bellini Ribeiro](https://github.com/bellini666) via [PR #4345](https://github.com/strawberry-graphql/strawberry/pull/4345/)
+
+
+0.312.3 - 2026-04-04
+--------------------
+
+This release fixes two security vulnerabilities in the WebSocket subscription
+handlers (CVE-2026-35526, CVE-2026-35523).
+
+**CVE-2026-35526 - Authentication bypass in `graphql-ws`**: The legacy
+`graphql-ws` protocol handler didn't verify that the `connection_init`
+handshake was completed before accepting `start` messages, allowing clients
+to bypass any authentication logic in `on_ws_connect`. The connection is now
+closed with `4401 Unauthorized` if the handshake hasn't been completed.
+
+**CVE-2026-35523 - Unbounded subscriptions per connection**: Both WebSocket
+protocol handlers allowed unlimited concurrent subscriptions on a single
+connection, making it possible for a malicious client to exhaust server
+resources. A new `max_subscriptions_per_connection` parameter has been added
+to all views (default: `100`). Set it to `None` to disable the limit.
+
+Example:
+
+```python
+import strawberry
+from strawberry.fastapi import GraphQLRouter
+
+schema = strawberry.Schema(query=Query, subscription=Subscription)
+
+# default is 100, set to None to disable the limit
+graphql_app = GraphQLRouter(schema, max_subscriptions_per_connection=50)
+```
+
+Contributed by [Patrick Arminio](https://github.com/patrick91) via [PR #4344](https://github.com/strawberry-graphql/strawberry/pull/4344/)
+
+
 0.312.2 - 2026-03-25
 --------------------
 
