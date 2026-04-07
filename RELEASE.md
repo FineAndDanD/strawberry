@@ -1,5 +1,5 @@
 Release type: minor
 
-This release adds support for Apollo Federation inline tracing (FTV1) format.
+This release attaches error details to Apollo Federation inline tracing (FTV1) trace nodes.
 
-When a request includes the `apollo-federation-include-trace: ftv1` header, Strawberry now records resolver timing information and includes it in the response under `extensions.ftv1` as a base64-encoded protobuf message, following the Apollo Federation trace format.
+When a resolver raises an exception, the error message, location, and path are now included in the corresponding trace node, allowing Apollo Studio to display error information alongside timing data.

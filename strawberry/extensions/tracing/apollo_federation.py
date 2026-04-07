@@ -115,6 +115,14 @@ def _encode_varint(value: int) -> bytes:
     return bytes(parts)
 
 
+# The classes below implement minimal protobuf serialization for Apollo's FTV1 trace format.
+# Field numbers and wire types match the Trace schema defined at:
+# https://github.com/apollographql/apollo-server/blob/main/packages/usage-reporting-protobuf/src/reports.proto
+#
+# Protobuf tag encoding: (field_number << 3) | wire_type
+# Wire type 0 = varint, wire type 2 = length-delimited (strings, bytes, embedded messages)
+
+
 class _SimpleTrace:
     """Minimal Trace message for FTV1."""
 
@@ -275,16 +283,6 @@ class _SimpleNode:
             parts.append(child_bytes)
 
         return b"".join(parts)
-
-
-def _create_trace() -> tuple[type[_SimpleTrace], type[_SimpleNode]]:
-    """Return the Trace and Node classes after checking protobuf availability.
-
-    Classes are defined at module scope for efficiency.
-    This function just validates protobuf is available.
-    """
-    _check_protobuf_available()
-    return _SimpleTrace, _SimpleNode
 
 
 class ApolloFederationTracingExtension(SchemaExtension):
